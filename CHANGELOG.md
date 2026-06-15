@@ -21,7 +21,6 @@
 
 **基础设施**
 - PHBT 内嵌引导：blob 直接从 vmlinux 落地，无需挂载
-- APEX 透明重定向：内核截获 openat/execve 静默重定向
 - Phantom VDisk：sysfs 被动挂载 + Ed25519 签名 + 原子更新
 - Phantom Clock：私有 monotonic 时钟源
 - SukiSU root + SUSFS 文件系统伪装
