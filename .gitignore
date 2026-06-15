@@ -1,0 +1,20 @@
+# .gitignore
+
+# Release artifacts (hosted via GitHub Releases, not in repo)
+dist/
+*.zip
+*.img
+
+# OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor
+.vscode/
+.idea/
+
+# Temporary
+/tmp/
