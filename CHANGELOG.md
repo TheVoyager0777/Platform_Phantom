@@ -17,7 +17,6 @@
 
 **性能控制**
 - PerfCtl 决策中枢：AMU/帧/VLoad → IPC→频率统一决策，四级 escape
-- 内核态 ELF 注入器：execve hook → 内核 ELF 解析，零 ptrace
 
 **基础设施**
 - PHBT 内嵌引导：blob 直接从 vmlinux 落地，无需挂载
