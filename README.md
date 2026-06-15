@@ -18,13 +18,11 @@
 
 Platform Phantom 是一套面向 Qualcomm Snapdragon 平台的 **Android 内核调度器增强系统**，通过 GKI-compatible 的 vendor hook 机制，在不破坏内核 KMI 的前提下注入高级调度策略。
 
-核心组件包括 WALT 负载跟踪、MIGT 迁移引导、Metis 调度反馈、Phase 优先级调度、IPC 感知、Binder 优先级继承等模块，全部以可加载内核模块（`.ko`）形式交付。
+核心组件包括 WALT 负载跟踪、Phase 优先级调度、IPC 感知、Binder 优先级继承等模块，全部以可加载内核模块（`.ko`）形式交付。
 
 ## 特性
 
 - ⚡ **WALT (Window-Assisted Load Tracking)** — 窗口辅助负载跟踪，比 PELT 更激进的调度响应
-- 🧭 **MIGT (Migration Guidance)** — 智能任务迁移引导，优化大小核负载分布
-- 🔄 **Metis Scheduler Feedback** — 逆向工程自 Qualcomm 闭源调度器的反馈环路
 - 🎯 **Phase Priority Scheduler** — 前台/后台/渲染多级优先级调度
 - 📡 **IPC-Aware Scheduling** — 跨进程通信感知的调度器协同
 - 🔗 **Binder Priority Inheritance** — Binder 事务优先级继承，防止优先级反转
