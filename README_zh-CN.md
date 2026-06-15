@@ -66,4 +66,4 @@ fastboot reboot
 
 ## 协议
 
-GPL-2.0。详见 [LICENSE](LICENSE)。
+本项目内核源码将会在审查结束后基于 GPL-2.0 协议发布。详见 [LICENSE](LICENSE)。

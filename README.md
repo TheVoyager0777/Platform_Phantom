@@ -137,7 +137,7 @@ A: 刷回你备份的原厂 boot.img：`fastboot flash boot stock_boot.img`
 
 ## 协议
 
-本项目内核源码基于 GPL-2.0 协议发布。详见 [LICENSE](LICENSE)。
+本项目内核源码将会在审查结束后基于 GPL-2.0 协议发布。详见 [LICENSE](LICENSE)。
 
 ---
 
