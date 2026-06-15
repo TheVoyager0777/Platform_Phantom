@@ -16,19 +16,38 @@
 
 ## 这是什么？
 
-Platform Phantom 是一套面向 Qualcomm Snapdragon 平台的 **Android 内核调度器增强系统**，通过 GKI-compatible 的 vendor hook 机制，在不破坏内核 KMI 的前提下注入高级调度策略。
+Platform Phantom 是一套面向 Qualcomm Snapdragon 平台的 **Android 内核调度器增强系统**，通过 GKI-compatible 的 vendor hook 机制，在不破坏内核 KMI 的前提下注入高级调度策略与性能控制组件。
 
-核心组件包括 WALT 负载跟踪、Phase 优先级调度、IPC 感知、Binder 优先级继承等模块，全部以可加载内核模块（`.ko`）形式交付。
+核心能力涵盖 Slim WALT 负载跟踪、Phase Lite AMU 采样调度、GLK/iAware 帧感知加速、IPC Peer 感知协同、Binder 优先级继承、内核态 ELF 注入器、APEX 透明重定向、内嵌引导加载等，全部以可加载内核模块（`.ko`）形式交付。
 
 ## 特性
 
-- ⚡ **WALT (Window-Assisted Load Tracking)** — 窗口辅助负载跟踪，比 PELT 更激进的调度响应
-- 🎯 **Phase Priority Scheduler** — 前台/后台/渲染多级优先级调度
-- 📡 **IPC-Aware Scheduling** — 跨进程通信感知的调度器协同
-- 🔗 **Binder Priority Inheritance** — Binder 事务优先级继承，防止优先级反转
-- 🔒 **GKI KMI 兼容** — 全部通过 vendor hook 注入，不修改 GKI 内核导出符号
-- 🛡️ **KernelSU / SukiSU 集成** — 内置 root 方案，SukiSU 支持 SUSFS
-- 📦 **AnyKernel3 发布** — 即刷即用，无需完整 ROM 替换
+### 调度器增强
+
+- ⚡ **Slim WALT** — 20ms 窗口辅助负载跟踪，16 级 bucket 平滑预测，替代内核 PELT 提供更精确的 CPU 利用率估算。支持运行时热路径开关（A/B 性能对比无需重刷），自动压制 Qualcomm 闭源 WALT RVH 避免双轨记账
+- 🎯 **Phase Lite** — 基于 ARM AMU 硬件计数器的 IPC（Instructions Per Cycle）采样策略。实时采集指令吞吐 + 内存停顿率，结合帧渲染/触控状态转换为 CPU 频率目标，通过 FreqQoS 后端驱动 cpufreq
+- 🖼️ **GLK 帧感知调度** — 追踪 SurfaceFlinger 帧生命周期（queue/dequeue/vsync/touch/doframe/drawframes），检测丢帧（Jank）历史并分级提升渲染线程优先级。支持自定义关键线程类别、场景切换（idle/bench/camera/game）
+- 📐 **iAware 多帧并行** — 多帧并发追踪（最多 8 帧），计算虚拟负载（VLoad）随帧时间线增长的紧迫度曲线。关联帧内 Binder 事务线程自动编组（TransThread），协同 Frame Boost 向渲染 RTG 注频
+- 🚀 **Render RT** — 识别渲染关键线程（RenderThread/GLThread/hwuiTask/GPU completion 等），在唤醒链上递归提升其调度类至 SCHED_RR/FIFO，确保 GPU 提交路径不被 CPU 争抢
+
+### IPC 协同
+
+- 📡 **IPC Peer 感知** — 实时追踪前台应用与 32 个对端进程的 Binder 事务 + wakeup 频次，自动将高频交互对端提升为 MVP Peer 并编入 RTG 优先调度组。2 秒衰减窗口 + 5 秒过期，自适应应用使用模式变化
+- 🔗 **Binder Priority Inheritance** — 在 Binder 事务上下文中，将 system_server、surfaceflinger 等 30+ 关键服务的调度策略安全提升至 SCHED_RR/FIFO。通过 workqueue 延后执行规避 tracepoint 上下文原子睡眠陷阱
+
+### 性能控制
+
+- 🧠 **PerfCtl 决策中枢** — 汇集 Phase Lite 的 AMU IPC 指标、GLK 的帧状态、iAware 的 VLoad 压力、FreqQoS 的频率表，做统一 IPC→频率映射决策。包含四级 escape 递进机制：低 IPC 持续帧数触发逐级提频探针，防止渲染卡顿不可逆恶化
+- 💉 **内核态 ELF 注入器** — 通过 execve hook 捕获目标进程启动，内核态直接解析 ELF、分配内存、完成重定位，无需 ptrace 或用户态注入器。支持 denylist/allowlist，零用户态痕迹
+
+### 基础设施
+
+- 📦 **PHBT 内嵌引导** — 构建时将 ART APEX、vendor .ko 等文件打包为 PHBT 二进制 blob，由 `phantom_early_loader` 在 `late_initcall` 直接从 vmlinux `.rodata` 解析落地到 `/phantom_boot`，无需挂载文件系统，无 loop device
+- 🔄 **APEX 透明重定向** — 内核态截获 ART APEX 的 `openat`/`execve` 调用，静默重定向到 phantom 提供的修改版 APEX（如绕过 apexd 公钥校验），对调用者透明。规则支持精确匹配和前缀匹配
+- 💾 **Phantom VDisk** — 内核侧提供 sysfs 被动接口，由用户态 daemon 通过 `trigger` 节点触发 erofs 挂载。支持 Ed25519 签名校验 + 原子回滚更新，用于安全交付用户态组件
+- ⏱️ **Phantom Clock** — 私有 monotonic 时钟源，带 offset + scale (ppm) 校准。所有 phantom 子系统共享统一时间戳，不受系统时间跳变影响
+- 🔒 **GKI KMI 安全注入** — 全模块通过 vendor hook（`trace_android_vh_*` + `trace_android_rvh_*`）接入内核调度路径。Hook 指针注册使用单次 cmpxchg（全屏障），杜绝中间态指针被误调用导致 EL1 panic
+- 🛡️ **KernelSU / SukiSU 集成** — 内置 root 方案，SukiSU 额外支持 SUSFS 文件系统伪装
 
 ## 支持设备
 
