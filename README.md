@@ -16,35 +16,60 @@
 
 ## 这是什么？
 
-Platform Phantom 是一套面向 Qualcomm Snapdragon 平台的 **Android 内核调度器增强系统**，通过 GKI-compatible 的 vendor hook 机制，在不破坏内核 KMI 的前提下注入高级调度策略与性能控制组件。
+Platform Phantom 是一套面向 Qualcomm Snapdragon 平台的 **Android 内核调度器增强系统**。通过 GKI-compatible 的 vendor hook 机制，在不破坏内核 KMI 的前提下注入高级调度与性能控制组件，显著提升 UI 流畅度与游戏帧率稳定性。
 
 核心能力涵盖 Slim WALT 负载跟踪、Phase Lite AMU 采样调度、GLK/iAware 帧感知加速、IPC Peer 感知协同、Binder 优先级继承、内嵌引导加载等，全部以可加载内核模块（`.ko`）形式交付。
+
+### 工作流程
+
+```
+渲染帧开始 ──→ GLK 追踪帧生命周期，检测丢帧
+    │
+    ├──→ iAware 计算 VLoad 虚拟负载紧迫度，关联 Binder 事务线程
+    │
+    ├──→ IPC Peer 追踪跨进程通信频次，识别高频对端 → 提升调度优先级
+    │
+    ├──→ Render RT 找到渲染线程，沿唤醒链提升至 RT 调度类
+    │
+    ├──→ Slim WALT 提供 20ms 窗口的精确 CPU 利用率
+    │
+    └──→ Phase Lite 采样 AMU 硬件计数器（指令吞吐 + 内存停顿）
+              │
+              └──→ FreqQoS 将 IPC 目标映射为最佳频率点
+                       │
+                       └──→ PerfCtl 汇集所有信号，做统一决策
+                                │
+                                ├──→ Slim WALT Governor 驱动 cpufreq
+                                └──→ Binder Prio 继承提升关键服务
+```
+
+系统中多个模块存在循环依赖风险（如 ph_glk ↔ slim_walt ↔ perfctl），通过 `phantom_common` 模块内置的 **IFH（Inter-Function Hook）** 回调槽打破加载顺序死锁：各模块向 `phantom_common` 注册回调指针，调用方通过 `phantom_ifh_call_*()` 间接投递事件，无需 load-time 符号依赖。
 
 ## 特性
 
 ### 调度器增强
 
-- ⚡ **Slim WALT** — 20ms 窗口辅助负载跟踪，16 级 bucket 平滑预测，替代内核 PELT 提供更精确的 CPU 利用率估算。支持运行时热路径开关（A/B 性能对比无需重刷），自动压制 Qualcomm 闭源 WALT RVH 避免双轨记账
-- 🎯 **Phase Lite** — 基于 ARM AMU 硬件计数器的 IPC（Instructions Per Cycle）采样策略。实时采集指令吞吐 + 内存停顿率，结合帧渲染/触控状态转换为 CPU 频率目标，通过 FreqQoS 后端驱动 cpufreq
-- 🖼️ **GLK 帧感知调度** — 追踪 SurfaceFlinger 帧生命周期（queue/dequeue/vsync/touch/doframe/drawframes），检测丢帧（Jank）历史并分级提升渲染线程优先级。支持自定义关键线程类别、场景切换（idle/bench/camera/game）
-- 📐 **iAware 多帧并行** — 多帧并发追踪（最多 8 帧），计算虚拟负载（VLoad）随帧时间线增长的紧迫度曲线。关联帧内 Binder 事务线程自动编组（TransThread），协同 Frame Boost 向渲染 RTG 注频
-- 🚀 **Render RT** — 识别渲染关键线程（RenderThread/GLThread/hwuiTask/GPU completion 等），在唤醒链上递归提升其调度类至 SCHED_RR/FIFO，确保 GPU 提交路径不被 CPU 争抢
+- ⚡ **Slim WALT** — 20ms 窗口辅助负载跟踪，16 级 bucket 平滑预测算法，替代内核 PELT 提供更精确的 CPU 利用率。支持运行时热路径开关（`core_hooks_enabled` 参数，A/B 性能对比无需重刷）。自动通过 `phantom_swalt_skip_rvh` jump label 压制 Qualcomm 闭源 WALT 的 RVH 探针，避免双轨并行导致任务记账错乱
+- 🎯 **Phase Lite** — 基于 ARM AMU（Activity Monitor Unit）硬件计数器的 IPC 采样策略。每 CPU 独立采集指令增量 + 周期增量 + 内存停顿增量，计算实时 IPC（Instructions Per Cycle）和 stall 百分比。结合帧渲染状态与触控信号，通过 `phantom_freq_qos` 后端将性能需求映射为精确的 cpufreq 频率目标
+- 🖼️ **GLK 帧感知调度** — 追踪 SurfaceFlinger 帧生命周期六态（queue/dequeue/vsync/touch/doframe/drawframes），计算帧预算（frame budget）与实际耗时的偏差检测丢帧。维护 Jank 历史窗口（8 帧），分级输出 NONE/LOW/MID/HIGH 四档 boost 级别。支持场景切换（idle/bench/schedule/camera/game）与自定义关键线程类别
+- 📐 **iAware 多帧并行** — 最多 8 帧并发追踪，每帧维护独立的渲染线程组、时间窗口和 VLoad（虚拟负载）紧迫度曲线。VLoad 随帧时间线非线性增长，在帧预算耗尽前提供渐进式压力信号。帧内 Binder 事务线程通过 TransThread 机制自动编入同一 RTG 组，协同 Frame Boost 向调度器注频
+- 🚀 **Render RT** — 通过 comm 名称匹配识别渲染关键线程（RenderThread/GLThread/hwuiTask/GPU completion/kgsl/mali 等），辅以 PID bloom filter 快速去重。在唤醒链上递归提升渲染相关任务至 SCHED_RR 或 SCHED_FIFO 实时调度类，确保 GPU 命令提交路径不被 CPU 争抢
 
 ### IPC 协同
 
-- 📡 **IPC Peer 感知** — 实时追踪前台应用与 32 个对端进程的 Binder 事务 + wakeup 频次，自动将高频交互对端提升为 MVP Peer 并编入 RTG 优先调度组。2 秒衰减窗口 + 5 秒过期，自适应应用使用模式变化
-- 🔗 **Binder Priority Inheritance** — 在 Binder 事务上下文中，将 system_server、surfaceflinger 等 30+ 关键服务的调度策略安全提升至 SCHED_RR/FIFO。通过 workqueue 延后执行规避 tracepoint 上下文原子睡眠陷阱
+- 📡 **IPC Peer 感知** — 实时追踪前台应用（top-app）与最多 32 个对端进程的 Binder 事务次数 + wakeup 唤醒频次。高频交互对端标记为 MVP Peer（IPC_PEER/BINDER 两级），自动编入 RTG（Runtime Task Group）优先调度组。2 秒 decay 衰减窗口 + 5 秒过期淘汰，自适应应用使用模式变化。通过 RCU 保护的 MVP notify 回调链向 Slim WALT 投递优先级信号
+- 🔗 **Binder Priority Inheritance** — 在 Binder 事务上下文中，将 system_server、surfaceflinger、cameraserver 等 30+ 关键服务的调度策略安全提升至 SCHED_RR 或 SCHED_FIFO。通过专属 workqueue 将 `sched_setscheduler_nocheck` 延后到进程上下文执行，规避 tracepoint 回调的 preempt-disabled 上下文导致的 "scheduling while atomic" 内核 panic
 
 ### 性能控制
 
-- 🧠 **PerfCtl 决策中枢** — 汇集 Phase Lite 的 AMU IPC 指标、GLK 的帧状态、iAware 的 VLoad 压力、FreqQoS 的频率表，做统一 IPC→频率映射决策。包含四级 escape 递进机制：低 IPC 持续帧数触发逐级提频探针，防止渲染卡顿不可逆恶化
+- 🧠 **PerfCtl 决策中枢** — 汇集 Phase Lite 的 AMU IPC 指标、GLK 的帧状态与 boost 级别、iAware 的 VLoad 压力值、FreqQoS 的频率-效率映射表，做统一的 IPC→频率决策。内置四级 escape 递进机制：当低 IPC 持续多帧时，逐级提升 probe 探针频率百分比（probe_level 0→3），防止渲染卡顿进入不可逆的恶化螺旋。决策结果以 freq_cap 形式注入 Phase Lite，再由 FreqQoS 驱动 Slim WALT Governor 调整 cpufreq
 
 ### 基础设施
 
-- 📦 **PHBT 内嵌引导** — 构建时将 vendor .ko 等文件打包为 PHBT 二进制 blob，由 `phantom_early_loader` 在 `late_initcall` 直接从 vmlinux `.rodata` 解析落地到 `/phantom_boot`，无需挂载文件系统，无 loop device
-- 💾 **Phantom VDisk** — 内核侧提供 sysfs 被动接口，由用户态 daemon 通过 `trigger` 节点触发 erofs 挂载。支持 Ed25519 签名校验 + 原子回滚更新，用于安全交付用户态组件
-- ⏱️ **Phantom Clock** — 私有 monotonic 时钟源，带 offset + scale (ppm) 校准。所有 phantom 子系统共享统一时间戳，不受系统时间跳变影响
-- 🔒 **GKI KMI 安全注入** — 全模块通过 vendor hook（`trace_android_vh_*` + `trace_android_rvh_*`）接入内核调度路径。Hook 指针注册使用单次 cmpxchg（全屏障），杜绝中间态指针被误调用导致 EL1 panic
+- 📦 **PHBT 内嵌引导** — 构建时将 vendor .ko 等文件打包为 PHBT 二进制 blob，链接进 vmlinux `.rodata` 段。`phantom_early_loader` 在 `late_initcall` 阶段解析 PHBT 头 → 创建 `/phantom_boot` 目录树 → 按表顺序加载 .ko 模块，全程无文件系统挂载、无 loop device、无 `s_bdev`
+- 💾 **Phantom VDisk** — 内核侧提供 sysfs 被动接口（`/sys/kernel/phantom_vdisk/`），由用户态 daemon 通过 `trigger` 节点触发 erofs 镜像挂载。支持 Ed25519 签名校验 + 原子回滚更新（新镜像挂载失败自动回退），用于安全交付用户态组件与 daemon 更新
+- ⏱️ **Phantom Clock** — 私有 monotonic 时钟源，基于 ktime 加 offset + scale (ppm) 两级校准。所有 phantom 子系统共享统一时间戳基准，不受系统时间跳变、NTP 校时、suspend/resume 影响。提供 sysfs 和 generic netlink 双接口
+- 🔒 **GKI KMI 安全注入** — 全模块通过 vendor hook（`trace_android_vh_*` + `trace_android_rvh_*`）接入内核调度路径，不修改 GKI 内核导出符号。Hook 指针注册采用单次 cmpxchg（ARM64 全屏障语义），确保指针在 NULL 和有效函数之间原子切换——杜绝中间态被误调用导致 EL1 panic
 - 🛡️ **KernelSU / SukiSU 集成** — 内置 root 方案，SukiSU 额外支持 SUSFS 文件系统伪装
 
 ## 支持设备
@@ -104,8 +129,10 @@ fastboot reboot
 │  phantom_perfctl daemon + native test CLI                │
 ├─────────────────────────────────────────────────────────┤
 │  Vendor 模块 (.ko)                                       │
-│  phantom_vh → slim_walt → phase → glk → iaware → ...   │
-│  通过 ph_vh_reg_xxx() 注册 hook                          │
+│  phantom_vh → phantom_common → slim_walt → phase_lite   │
+│  → ph_glk → phantom_iaware → ph_ipc → binder_prio       │
+│  → render_rt → phantom_perfctl → phantom_vdisk          │
+│  通过 ph_vh_reg_xxx() 注册 hook，IFH 回调打破循环依赖     │
 ├─────────────────────────────────────────────────────────┤
 │  vmlinux (phantom_stubs.c)                               │
 │  函数指针定义 + EXPORT_SYMBOL                             │
